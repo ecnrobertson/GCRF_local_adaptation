@@ -1,0 +1,233 @@
+---
+title: "GCRF_Pop_Struc_Updated"
+author: "Erica Robertson"
+date: "2025-01-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir="~/Desktop/GCRF/GCRF_Pub/")
+```
+
+## Principal Component Analysis
+We want to generate a PCA to assess population structure between the two groups, WMNT and PIPA. To do this, following a tutorial by https://speciationgenomics.github.io/pca/ that using Plink. Could also use PCAngst but I don't immediately have code for that.
+
+
+```{bash}
+plink --bfile ../03.GWAS_input/GCRF_merged.SNP.filtered_0.5miss --aec \
+--set-missing-var-ids @:# \
+--indep-pairwise 25 10 0.2 --out GCRF_merged.filtered_0.5miss_imputed4.1.ld0.2
+# Pruning complete.  5526104 of 7739836 variants removed. -->
+# Marker lists written to -->
+# GCRF_merged.filtered_0.5miss_imputed4.1.ld.prune.in and -->
+# GCRF_merged.filtered_0.5miss_imputed4.1.ld.prune.out . -->
+```
+
+So for our plink command, we did the following:
+--vcf - specified the location of our VCF file.
+--update-ids recode.txt - this changed the FID and IID to what we wants instead of duplicated IIDs
+--allow-extra-chr - allow additional chromosomes beyond the human chromosome set. This is necessary as otherwise plink expects chromosomes 1-22 and the human X chromosome.
+--set-missing-var-ids - also necessary to set a variant ID for our SNPs. Human and model organisms often have annotated SNP names and so plink will look for these. We do not have them so instead we set ours to default to chromosome:position which can be achieved in plink by setting the option @:# - see here for more info.
+--indep-pairwise - finally we are actually on the command that performs our linkage pruning! The first argument, 25 denotes we have set a window of 25 Kb. The second argument, 10 is our window step size - meaning we move 10 bp each time we calculate linkage. Finally, we set an r2 threshold - i.e. the threshold of linkage we are willing to tolerate. Here we prune any variables that show an r2 of greater than 0.1.vc
+--out Produce the prefix for the output data.
+
+Now that we've identified what SNPs are under linkage, we need to remove them. I'm doing an additional step here to make sure we narrow it down to just the individuals we're interested in.
+```{bash}
+plink --bfile ../03.GWAS_input/GCRF_merged.SNP.filtered_0.5miss --aec --set-missing-var-ids @:# \
+--extract GCRF_merged.filtered_0.5miss_imputed4.1.ld0.2.prune.in \
+--make-bed --pca --out GCRF_merged.filtered_0.5miss0.2ld
+```
+
+--extract - this just lets plink know we want to extract only these positions from our VCF - in other words, the analysis will only be conducted on these.
+--make-bed - this is necessary to write out some additional files for another type of population structure analysis - a model based approach with admixture.
+--pca - fairly self explanatory, this tells plink to calculate a principal components analysis.
+ls
+PCA output:
+.eigenval - the eigenvalues from our analysis
+.eigenvec- the eigenvectors from our analysis
+plink binary output:
+.bed - the cichlids bed file - this is a binary file necessary for admixture analysis. It is essentially the genotypes of the pruned dataset recoded as 1s and 0s.
+.bim - a map file (i.e. information file) of the variants contained in the bed file.
+.fam - a map file for the individuals contained in the bed file.
+
+Now move the files over to my computer.
+```{bash}
+rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/GCRF_Pub/01a.pop_struc/*.eigen* /Users/ericarobertson/Desktop/GCRF/GCRF_Pub/analysis/pop_structure/
+```
+
+Time to plot the PCA.
+```{r}
+library(tidyverse)
+pca05 <- read_table("analysis/pop_structure/GCRF_merged.filtered_0.5miss0.2ld.eigenvec", col_names = FALSE)
+eigenval05 <- scan("analysis/pop_structure/GCRF_merged.filtered_0.5miss0.2ld.eigenval")
+
+# sort out the pca data
+# remove nuisance column
+pca05 <- pca05[,-1]
+# set names
+names(pca05)[1] <- "ind"
+nrow(pca05)
+names(pca05)[2:ncol(pca05)] <- paste0("PC", 1:(ncol(pca05)-1))
+```
+
+Good, that is the number of samples we expect to have.
+
+
+```{r}
+id.loc <- read.table("analysis/pop_structure/GCRF_FID_IID.txt")
+loc <- data.frame(as.factor(id.loc$V3), id.loc$V4)
+colnames(loc) <- c("site", "ind")
+pca05 <- left_join(pca05, loc, by="ind")
+pca05$spp <- "GCRF"
+spp <- pca05$spp
+pca05 <- pca05 %>% select(spp, ind, site, everything())
+
+# combine - if you want to plot each in different colours
+spp_loc <- paste0("GCRF", "_", pca05$site)
+
+pca05 <- as_tibble(data.frame(pca05, spp_loc))
+```
+
+```{r}
+pve05 <- data.frame(PC = 1:20, pve = eigenval05/sum(eigenval05)*100)
+
+# make plot
+a05 <- ggplot(pve05, aes(PC, pve)) + geom_bar(stat = "identity")
+a05 + ylab("Percentage variance explained") + theme_light()
+```
+
+```{r}
+b05 <- ggplot(pca05, aes(PC1, PC2, col = site, shape = site)) + geom_point(size = 3)
+b05 <- b05 + scale_colour_manual(values = c("red", "blue"))
+b05 <- b05 + coord_equal() + theme_light()
+b05 + xlab(paste0("PC1 (", signif(pve05$pve[1], 3), "%)")) + ylab(paste0("PC2 (", signif(pve05$pve[2], 3), "%)"))
+```
+
+```{r}
+library(ggplot2)
+library(ggrepel)
+library(plotly)
+b05 <- ggplot(pca05, aes(PC1, PC2, col = site, text = ind)) + 
+  geom_point(size = 3, alpha = 0.5) +
+  scale_colour_manual(values = c("lightblue3", "tomato"), labels = c("WMNT", "PIPA")) +
+  theme_classic() +
+  #geom_label_repel(aes(label = ind), max.overlaps = 100) +
+  xlab(paste0("PC1 (", signif(pve05$pve[1], 3), "%)")) +
+  ylab(paste0("PC2 (", signif(pve05$pve[2], 3), "%)"))
+
+# Convert ggplot to interactive plot with ggplotly
+ggplotly(b05, tooltip = "text")
+ggsave("analysis/pop_structure/PCA.png",b05 )
+```
+
+# ADMIXTURE
+Following the first part of this:
+https://speciationgenomics.github.io/ADMIXTURE/
+Then plotting from this:
+https://owensgl.github.io/biol525D/Topic_8-9/plotting_structure.html
+
+Using the LD pruned SNPs from before and the same input files.
+
+ADMIXTURE does not accept chromosome names that are not human chromosomes. We will thus just exchange the first column by 0
+
+```{bash}
+awk '{$1="0";print $0}' GCRF_merged.filtered_0.8miss.bim > GCRF_merged.filtered_0.8miss.bim.tmp
+mv GCRF_merged.filtered_0.8miss.bim.tmp GCRF_merged.filtered_0.8miss.bim
+```
+
+Running admixture with k=1-3
+
+```{bash, label="admixture.sbatch"}
+#!/bin/bash
+#
+#SBATCH --job-name=admix
+#SBATCH --output=admix.%j.out
+#SBATCH --error=admix.%j.err
+#SBATCH -t 8:00:00
+#SBATCH -p amilan
+#SBATCH --nodes=1
+#SBATCH --mem=16G
+#SBATCH --mail-type=END,FAIL
+#SBATCH  --mail-user=ericacnr@colostate.edu
+
+#echo commands to stdout
+
+source ~/.bashrc
+set -x
+
+module load gcc/10.3
+module load openmpi
+
+conda activate GWAS2
+
+admixture --cv GCRF_merged.filtered_0.8miss.bed 1 > GCRF_merged.filtered_0.8miss.log1.out
+
+admixture --cv GCRF_merged.filtered_0.8miss.bed 2 > GCRF_merged.filtered_0.8miss.log2.out
+
+admixture --cv GCRF_merged.filtered_0.8miss.bed 3 > GCRF_merged.filtered_0.8miss.log3.out
+```
+
+```{bash}
+rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/GCRF_Pub/01a.pop_struc/*.Q /Users/ericarobertson/Desktop/GCRF/GCRF_Pub/analysis/pop_structure
+```
+
+To identify the best value of k clusters which is the value with lowest cross-validation error, we need to collect the cv errors. 
+
+```{bash}
+awk '/CV/ {print $3,$4}' *out | cut -c 4,7-20 > GCRF.cv.error
+```
+1 0.59850
+2 0.61161
+3 0.62749
+
+So based on this, k=1 is the best. This makes sense.
+
+```{r}
+samplelist <- pca05$ind
+
+all_data <- tibble(sample=character(),
+                   k=numeric(),
+                   Q=character(),
+                   value=numeric())
+
+for (k in 1:3){
+    data <- read_delim(paste0("analysis/pop_structure/GCRF_merged.filtered_0.8miss.",k,".Q"),
+                       col_names = paste0("Q",seq(1:k)),
+                       delim=" ")
+    data$sample <- samplelist
+    data$k <- k
+    
+    #This step converts from wide to long.
+    data %>% gather(Q, value, -sample,-k) -> data
+    all_data <- rbind(all_data,data)
+}
+
+head(all_data)
+
+ADMIX_plot <- all_data %>%
+  filter(k == 2) %>%
+  ggplot(.,aes(x=sample,y=value,fill=factor(Q))) + 
+  geom_bar(stat="identity",position="stack") +
+  xlab("Sample") + ylab("Ancestry") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1)) +
+  scale_fill_brewer(palette="Set1",name="K",
+                    labels=c("1","2"))
+ggplotly(ADMIX_plot)
+```
+
+
+
+```{r}
+all_k <- all_data %>%
+  ggplot(aes(x = sample, y = value, fill = factor(Q))) + 
+  geom_bar(stat = "identity", position = "stack") +
+  xlab("Sample") + ylab("Ancestry") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1, size = 5)) +  # Adjust size here
+  scale_fill_brewer(palette = "Set1", name = "K", labels = seq(1:5)) +
+  facet_wrap(~k, ncol = 1)
+
+ggplotly(all_k)
+```

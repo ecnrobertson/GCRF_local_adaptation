@@ -1,0 +1,293 @@
+---
+title: "05a_GWAS_analysis"
+author: "Erica Robertson"
+date: "2025-01-31"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir="~/Desktop/GCRF/GCRF_Pub")
+```
+
+Now that we've gone through the process of running the GWAS, both bslmm and lmm, let's go through how to figure out what the output means.
+
+So this is all best done have gone through the Satsuma Synteny process and getting updated result files where the SNPs all have their associated chromosome position. This means the the final outputs are easier to interpret and that everything is ready to be plotted nicely.
+
+# LMM output: .assoc.txt
+
+This script reads in the .assoc.txt file from the output and filters it based on the significance of each snp (p_wald) to outliers (those less than whatever threshold) and neutral (those above the threshold). This identifies the SNPs that can be considered significantly associated with the SNP.
+
+First, get the files.
+```{bash}
+rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/GCRF_Pub/04.lmm/output/*soft_lmm.assoc.txt /Users/ericarobertson/Desktop/GCRF/GCRF_Pub/results/lmm_output
+```
+
+Here's a basic version of what I'm going, on just one trait.
+
+```{r, label="lmm_output_sample"}
+width <-read_delim('results/lmm_output/GCRF_merged.SNP.filtered_0.5miss_nodes_lmm.assoc.txt',delim="\t") %>%  mutate(outlier=if_else(p_wald<5e-8,"outlier","neutral")) 
+c <- width %>%  mutate(win_num = 1:nrow(width)) 
+dim(c)
+out<-c %>% filter(outlier=="outlier")
+dim(out)
+
+out %>% write.table("GCRF_merged.SNP.filtered_0.5miss_wing_chord_lmm.outlier_tally.txt",row.names=F,quote=F)
+```
+
+I've also written up a for loop that will go through and do this for every output file, based on the trait name. It then writes output files (if there are any SNPs) and also creates a summary file for all the significant SNPs together. You can switch between the 0.5 and 0.8 missingness datasets by adjusting the miss variable. Pretty neat.
+
+```{r, label="lmm_output_loop"}
+library(dplyr)
+library(readr)
+
+# Define the traits as a vector
+traits <- c("wing_chord", "tail", "nare", "beak_length", 
+            "beak_depth", "beak_width", "pen_length", "pen_num", 
+            "plum_length", "plum_num", "nodes")
+
+miss <- "0.5"
+
+assign(paste0("lmm_summary", miss, "_df"), data.frame())
+
+# Loop through each trait
+for (trait in traits) {
+  # Read the file for the current trait
+   file_path <- paste0("results/lmm_output/GCRF_merged.SNP.filtered_",miss,"miss_",trait,"_soft_lmm.assoc.txt")
+  
+  # Check if the file exists
+  if (!file.exists(file_path)) {
+    # Print message if file does not exist
+    print(paste(trait, "doesn't exist"))
+    next # Skip to the next iteration of the loop
+  }
+  
+  # Read the file for the current trait
+  width <- read_delim(file_path, delim = "\t") %>%
+           mutate(outlier = if_else(p_wald < 5e-8, "outlier", "neutral"))
+  
+  # Add a window number column
+  c <- width %>%
+       mutate(win_num = 1:nrow(width))
+  
+  # Filter for outliers
+  out <- c %>%
+         filter(outlier == "outlier")
+  
+  # Print the trait and the dimensions of the outlier data
+  print(paste(trait, dim(out)))
+  
+  if (nrow(out) > 0) {
+    write.csv(out, 
+                paste0("results/lmm_results/GCRF_merged.SNP.filtered_",miss,"_",trait,"_soft_lmm.outlier_tally.csv"), 
+                row.names = FALSE, 
+                quote = FALSE)
+    
+    # Add a column for the trait name and append to the summary dataframe
+    out <- out %>%
+           mutate(trait = trait)
+    summary_df <- get(paste0("lmm_summary", miss, "_df"))
+    updated_summary <- bind_rows(summary_df, out)
+    assign(paste0("lmm_summary", miss, "_df"), updated_summary)
+  }
+}
+
+final_summary <- get(paste0("lmm_summary", miss, "_df"))
+write.csv(final_summary, paste0("results/lmm_results/lmm_summary_outliers_",miss,"_soft.csv"), row.names = FALSE, quote=F)
+```
+
+# BSLMM output: .params.txt and .gamma.txt
+
+BSLMM has two main outputs. The first are the hyperparameters, which give an indication as to how well the model ran and can tell you what percent of the trait variation is explained by the snps identified. The other is the params file, which has posterior inclusion probabilities (PIP) values for each snp which can be filtered to identify the most imporant snps.
+
+```{bash}
+rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/GCRF_Pub/05.bslmm/output/*_soft3_bslmm.param.txt /Users/ericarobertson/Desktop/GCRF/GCRF_Pub/results/bslmm_output
+
+rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/GCRF_Pub/05.bslmm/output/*_soft3_bslmm.hyp.txt /Users/ericarobertson/Desktop/GCRF/GCRF_Pub/results/bslmm_output
+```
+
+# hyperparameters
+
+```{r, label="bslmm_hyper"}
+traits <- c("wing_chord", "tail", "nare", "beak_length", 
+            "beak_depth", "beak_width", "pen_length", "pen_num", 
+            "plum_length", "plum_num", "nodes")
+
+miss <- "0.5"
+
+# Load hyperparameter file
+for (trait in traits) {
+  file_path <- paste0("results/bslmm_output/GCRF_merged.SNP.filtered_",miss,"miss_",trait,"_soft3_bslmm.hyp.txt")
+  if (!file.exists(file_path)) {
+    # Print message if file does not exist
+    print(paste(trait, "doesn't exist"))
+    next # Skip to the next iteration of the loop
+  }
+  hyp.params<-read.table(file_path,header=T)
+  # Get mean, median, and 95% ETPI of hyperparameters
+  # pve -> proportion of phenotypic variance explained by the genotypes
+  pve<-c("PVE", mean(hyp.params$pve),quantile(hyp.params$pve, probs=c(0.5,0.025,0.975)))
+  # pge -> proportion of genetic variance explained by major effect loci
+  pge<-c("PGE",mean(hyp.params$pge),quantile(hyp.params$pge, probs=c(0.5,0.025,0.975)))
+  # pi -> proportion of variants with non-zero effects
+  pi<-c("pi",mean(hyp.params$pi),quantile(hyp.params$pi, probs=c(0.5,0.025,0.975)))
+  # n.gamma -> number of variants with major effect
+  n.gamma<-c("n.gamma",mean(hyp.params$n_gamma),quantile(hyp.params$n_gamma, probs=c(0.5,0.025,0.975)))
+  
+  # get table of hyperparameters
+  hyp.params.table<-as.data.frame(rbind(pve,pge,pi,n.gamma),row.names=F)
+  colnames(hyp.params.table)<-c("hyperparam", "mean","median","2.5%", "97.5%")
+  # write table to file
+  write.csv(hyp.params.table, file=paste0("results/bslmm_results/hyperparameters/hyperparameters_",trait,miss,"_soft3.csv"), quote=F)
+  
+  # plot traces and distributions of hyperparameters
+  pdf(file=paste0("results/bslmm_results/hyperparameters/hyperparameters_",trait,miss,"_soft3.pdf"), width=8.3,height=11.7)
+  layout(matrix(c(1,1,2,3,4,4,5,6), 4, 2, byrow = TRUE))
+  # PVE
+  plot(hyp.params$pve, type="l", ylab="PVE", main="PVE - trace")
+  hist(hyp.params$pve, main="PVE - posterior distribution", xlab="PVE")
+  plot(density(hyp.params$pve), main="PVE - posterior distribution", xlab="PVE")
+  # PGE
+  plot(hyp.params$pge, type="l", ylab="PGE", main="PGE - trace")
+  hist(hyp.params$pge, main="PGE - posterior distribution", xlab="PGE")
+  plot(density(hyp.params$pge), main="PGE - posterior distribution", xlab="PGE")
+
+  # pi
+  plot(hyp.params$pi, type="l", ylab="pi", main="pi")
+  hist(hyp.params$pi, main="pi", xlab="pi")
+  plot(density(hyp.params$pi), main="pi", xlab="pi")
+
+  # No gamma
+  plot(hyp.params$n_gamma, type="l", ylab="n_gamma", main="n_gamma - trace")
+  hist(hyp.params$n_gamma, main="n_gamma - posterior distribution", xlab="n_gamma")
+  plot(density(hyp.params$pi), main="n_gamma - posterior distribution", xlab="n_gamma")
+
+  dev.off()
+}
+
+```
+
+So once that's done, we can look over them and see if any need to get run again to try and have better hyperparameters.
+
+#gamma
+Now that I'm happy with the runs, I'm gonna move on to identifying the significant SNPs. We're going to use Posterior Inclusion Probability as our measure of significance. We test with a bunch of different significance threshold to see what comes up. Ideally, for the final one you would use either 0.1 or 0.5, but 0.01 is acceptable too according to some papers.
+
+```{r, label="bslmm_output_loop"}
+library(data.table)
+
+traits <- c("wing_chord", "tail", "nare", "beak_length", 
+            "beak_depth", "beak_width", "pen_length", "pen_num", 
+            "plum_length", "plum_num", "nodes")
+
+miss <- "0.5"
+
+for (trait in traits) {
+  # Load parameters output
+   file_path <- paste0("results/bslmm_output/GCRF_merged.SNP.filtered_",miss,"miss_",trait,"_soft_bslmm.param.txt")
+  if (!file.exists(file_path)) {
+    # Print message if file does not exist
+    print(paste(trait, "doesn't exist"))
+    next # Skip to the next iteration of the loop
+  }
+   params<-fread(file_path,header=T,sep="\t", data.table=F)
+   
+   # Get variants with high Posterior Inclusion Probability (PIP) == gamma
+   
+   # PIP is the frequency a variant is estimated to have a sparse effect in the MCMC
+   
+   params.pipsort<-params[order(-params$gamma),]
+   
+   # sets of variants above a certain threshold
+   # variants with effect in 1%, 10%, 25%, 50%, MCMC samples or more
+   thresholds <- c(0.01,0.05,0.10,0.25,0.5)
+   for (i in thresholds) {
+     pip<-params.pipsort[params.pipsort$gamma>=i,]
+     
+     if (nrow(pip) > 0) {
+       write.csv(pip, file=paste0("results/bslmm_results/",trait, miss ,"_pip",i,"_soft.csv"), quote=F, row.names=F)
+     }
+   }
+}
+
+thresholds <- c(0.01, 0.05, 0.10)
+
+for (i in thresholds) {
+  summary_df <- data.frame()
+  for (trait in traits) {
+    file_path <- paste0("results/bslmm_results/",trait, miss, "_pip", i, "_soft.csv")
+    
+    if (!file.exists(file_path)) {
+      print(paste(trait, miss, "_pip", i, "doesn't exist"))
+      next
+    }
+    
+    pip <- read.csv(file_path)
+    pip <- pip %>% mutate(trait = trait)
+    
+    summary_df <- bind_rows(summary_df, pip)
+  }
+  if (nrow(summary_df) > 0) {
+    output_file <- paste0("results/bslmm_results/summary_pip", i, "_", miss, "_soft.csv")
+    write_csv(summary_df, output_file)
+    print(paste("Summary for threshold", i, "saved to", output_file))
+  } else {
+    print(paste("No data found for threshold", i))
+  }
+}
+
+file.stack <- list.files(path="results/bslmm_results/",
+                         pattern="^summary.*\\.csv$",
+                         full.names=T)
+data_list <- lapply(file.stack,read.csv)
+
+names(data_list) <- basename(file.stack)
+
+# Loop through the data_list
+for (name in names(data_list)) {
+  df <- data_list[[name]]  # Access the dataframe
+  print(name)              # Print the file name
+  print(nrow(df))          # Print the number of rows
+}
+```
+
+
+
+
+```{r}
+traits <- c("wing_chord", "tail", "nare", "beak_length", 
+            "beak_depth", "beak_width", "pen_length", "pen_num", 
+            "plum_length", "plum_num", "nodes")
+
+miss <- "0.5"
+
+for (trait in traits) {
+  # Load parameters output
+   file_path <- paste0("results/bslmm_output/GCRF_merged.SNP.filtered_",miss,"miss_",trait,"_soft_bslmm.param.txt")
+  if (!file.exists(file_path)) {
+    # Print message if file does not exist
+    print(paste(trait, "doesn't exist"))
+    next # Skip to the next iteration of the loop
+  }
+   params<-fread(file_path,header=T,sep="\t", data.table=F)
+   
+   # Get variants with high Posterior Inclusion Probability (PIP) == gamma
+   
+   # PIP is the frequency a variant is estimated to have a sparse effect in the MCMC
+   
+   params.pipsort<-params[order(-params$gamma),]
+   
+   # sets of variants above a certain threshold
+   # variants with effect in 1%, 10%, 25%, 50%, MCMC samples or more
+   thresholds <- c(0.01)
+   for (i in thresholds) {
+     pip<-params.pipsort
+     
+     hist(pip$gamma,
+         main = paste("PIP Histogram for", trait),
+         xlab = "Posterior Inclusion Probability (PIP)",
+         ylab = "Frequency",
+         breaks = 20,
+         col = "steelblue")}
+}
+
+```

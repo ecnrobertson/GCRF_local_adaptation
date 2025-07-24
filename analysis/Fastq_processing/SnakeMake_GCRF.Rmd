@@ -1,0 +1,140 @@
+---
+title: "SnakeMake_GCRF"
+output: html_document
+---
+
+# TRIAL RUN
+Here I'm going to be trying to go through Holden's SnakeMake for processing Fastq data.
+## 1. Snakemake environment
+I'm making a snakemake environment with 8.20.4. This is the version that Holden has been running everything on.
+
+```{bash}
+conda activate base
+mamba create -c conda-forge -c bioconda -n snakemake-8.20.4 snakemake=8.20.4
+```
+
+## 2. Clone the Snakemake repository
+I forked Holden's repository and am going to clone it onto my cluster
+
+```{bash}
+git clone https://github.com/ecnrobertson/mega-non-model-wgs-snakeflow.git
+```
+
+## 3. activate the environment
+
+```{bash}
+cd mega-non-model-wgs-snakeflow
+conda activate snakemake-8.20.4
+```
+
+## 4. dry run
+
+This tells you all the different steps that will be taken, but does not actually run them.
+```{bash}
+snakemake --cores 20 --use-conda  -np --configfile .test/config/config.yaml
+```
+
+The --configfile option tells snakemake to find all the configurations for the run in .test/config/config.yaml. This runs a very small test data set of 8 samples from fastq to VCF.
+The -np option tells snakemake to do a dry run and also to print all the shell commands that it would use.
+
+That ran just fine!
+
+
+## 5. set up environments
+Set up environments...
+
+```{bash}
+snakemake --cores 20 --use-conda  --conda-create-envs-only --configfile .test/config/config.yaml
+```
+
+## 6. test run
+Do a whole run of the test data set. Note that this is set up to use 20 cores, which is reasonable if you have checked out an entire node on SEDNA, using, for example srun -c 20 --pty /bin/bash. At any rate, to do the run you give this command:
+
+```{bash}
+snakemake --cores 20 --use-conda --configfile .test/config/config.yaml --jobs 20 \
+  --cluster "sbatch --time=2:00:00 --mem=16G --cpus-per-task=2 --output=logs/slurm-%j.out --error=logs/slurm-%j.err"
+```
+
+## 7. make sure it worked
+Run dry run again to make sure there aren't any jobs left...
+
+```{bash}
+snakemake --cores 20 --use-conda  --keep-going  -np --configfile .test/config/config.yaml
+```
+
+# MAKING IT WORK FOR MINE
+
+So the first step is to make all of the input files specific to my file set up.
+
+First, let's get a list of all the file paths...
+
+```{bash}
+#This excludes the "MD5.txt" files
+find /scratch/alpine/ericacnr@colostate.edu/GCRF_Pub/01.fastq_processing/raw_data/01.RawData/ -type f ! -name 'MD5.txt' > full-paths-to-fastqs.txt
+```
+
+```{bash}
+rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/GCRF_Pub/01.fastq_processing/full-paths-to-fastqs.txt /Users/ericarobertson/Desktop/GCRF/GCRF_Pub/analysis/Fastq_processing 
+```
+Now some fiddling to get the meta-data out. There is a slight problem which is that some of the files start with "Z" and others start with "R_"...
+
+```{r}
+library(tidyverse)
+
+x <- tibble(
+  path = read_lines("full-paths-to-fastqs.txt")
+) %>%
+  mutate(
+    base = basename(path), 
+    .before = path
+  ) %>%
+  mutate(
+    # Use a regular expression to extract the sample ID (e.g., 23N00549)
+    sample_id = str_extract(base, "(?<=R_|Z)\\d{2}N\\d+"),
+    # Extract the lane (L7 or L4), read (1 or 2), and other components if needed
+    lane = str_extract(base, "L\\d+"),
+    read = str_extract(base, "(?<=_)1(?=\\.fq\\.gz)|(?<=_)2(?=\\.fq\\.gz)"),
+    read = case_when(
+      read == "1" ~ "fq1",
+      read == "2" ~ "fq2",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  pivot_wider(
+    names_from = read,
+    values_from = path
+  ) %>%
+  mutate(
+    sample = sprintf("s%03d", 1:n()),
+    .before = sample_id
+  ) %>%
+  mutate(
+    unit = 1,
+    platform = "ILLUMINA",
+    library = str_c("Lib-", lane),
+    flowcell = "HY75HDSX2", # or pull this dynamically if needed
+    .after = sample_id
+  ) %>%
+  select(-base)
+```
+
+Now just need to write the units and the sample files...
+
+```{r}
+write_tsv(x, file = "units.tsv")
+
+x %>%
+  select(sample) %>%
+  write_tsv("samples.tsv")
+```
+
+
+
+
+
+
+
+
+
+
+

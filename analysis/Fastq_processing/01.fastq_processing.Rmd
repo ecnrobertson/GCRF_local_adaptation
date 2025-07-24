@@ -1,0 +1,228 @@
+---
+title: "01.fastq_processing"
+author: "Erica Robertson"
+date: "2025-01-31"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir="~/Desktop/GCRF/GCRF_Pub/")
+```
+
+This is a walk through of the scripts to processing sequence data. This is drawn from scripts CH has shared with me as well as Holden's Snakemake workflow.
+
+# Getting the Sequence Data
+So, generally, you're going to download the sequence data from OVIS, which is where we store the raw data. A couple lines to help guide accessing OVIS and transfering files over:
+
+```{bash}
+ssh ericacnr@ovis.biology.colostate.edu
+# Enter your password, you can get this from Dan Sloan
+
+#I like to then navigate to the directory above the one I'm trying to copy over
+
+ls ../BGP_Data_Share/LCWG_raw_data/
+
+#Then log into your alpine and navigate to where you want to drop the files there
+
+sftp ericacnr@colostate.edu@login.rc.colorado.edu
+#Enter password with ",push" afterwards to trigger the secondary confirmation
+
+cd /scratch/alpine/ericacnr@colostate.edu/GCRF/
+
+#Pur -r tells it to drop all of the files under the directory you're defining, so it'll copy everything. Give it the path to the folder you want to copy.
+Put -r GCRF/GCRF_Novoseq_Plate1_08082023/
+```
+
+# Trimming
+## 1a.trimmomatic.GCRF.sbatch
+First we need to trim off the adapter sequences. We can use trimmomatic or fastp.
+
+Run this within the folder you put the sequence data into.
+01.fastq_processing/raw_data
+```{bash, label="1a.trimmomatic.GCRF.sbatch"}
+#!/bin/bash
+##################
+#SBATCH --job-name=TRIM
+#SBATCH --output=TRIM.%j.out
+#SBATCH --error=TRIM.%j.err
+##################
+#SBATCH -t 6:00:00
+#SBATCH --partition=amilan
+#SBATCH --qos=normal
+#SBATCH --ntasks-per-node 4
+##################
+#SBATCH --mail-type=END
+#SBATCH  --mail-user=ericacnr@colostate.edu
+##################
+
+#echo commands to stdout
+set -x
+
+##################
+#run sbatch in for loop
+#now run normal batch commands within a for loop, run in folder with fastq files to assign correct plate number
+#for sample in `ls *1.fq |cut -f1 -d '_'|sed 's/Z//g'`; do echo  $sample; sbatch ../1a.trimmomatic.GCRF.sbatch $sample ; done
+
+source ~/.bashrc
+conda activate bioinf 
+
+##Variables:sampel name and number associated with sample
+sample=$1
+
+#if you use module load trimmomatic: 
+trimmomatic PE -threads 4 Z"$sample"_CK...fq Z"$sample"_CK..._fq  \
+              "$sample"_1.trimmed.fastq "$sample"_1un.trimmed.fastq \
+              "$sample"_2.trimmed.fastq "$sample"_2un.trimmed.fastq \
+              ILLUMINACLIP:$ADAPTERS/TruSeq3-PE-2.fa:2:30:10 \
+              SLIDINGWINDOW:4:20 LEADING:3 TRAILING:3 MINLEN:36
+```
+
+## 1b.fastp.GCRF.sbatch
+```{bash}
+#!/bin/bash
+##################
+#SBATCH --job-name=TRIM
+#SBATCH --output=TRIM.%j.out
+#SBATCH --error=TRIM.%j.err
+##################
+#SBATCH -t 6:00:00
+#SBATCH --partition=amilan
+#SBATCH --qos=normal
+#SBATCH --ntasks-per-node 4
+##################
+#SBATCH --mail-type=END
+#SBATCH  --mail-user=ericacnr@colostate.edu
+##################
+
+#echo commands to stdout
+set -x
+
+##################
+#run sbatch in for loop
+#now run normal batch commands within a for loop, run in folder with fastq files to assign correct plate number
+#for sample in `ls *1.fq |cut -f1 -d '_'|sed 's/Z//g'`; do echo  $SAMPLE; sbatch ../1b.fastp.GCRF.sbatch $sample ; done
+
+source ~/.bashrc
+conda activate bioinf 
+
+# Input arguments
+sample=$1
+trim_settings="\
+--adapter_sequence=AGATCGGAAGAGCACACGTCTGAACTCCAGTCA \
+--adapter_sequence_r2=AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT \
+--detect_adapter_for_pe \
+--cut_right \
+--cut_right_window_size 4 \
+--cut_right_mean_quality 20"
+
+# Define input FASTQ paths based on naming convention
+r1="${sample}.R1.fastq.gz"
+r2="${sample}.R2.fastq.gz"
+
+
+# Define output directories
+outdir="trimmed/"
+mkdir -p "${outdir}/trimmed" "${outdir}/qc/fastp" "${outdir}/logs/trim_reads_pe" "${outdir}/benchmarks/trim_reads_pe"
+
+# Run fastp
+fastp \
+    -i "$r1" -I "$r2" \
+    -o "${outdir}/${sample}---${unit}.1.fastq.gz" \
+    -O "${outdir}/${sample}---${unit}.2.fastq.gz" \
+    -h "${outdir}/qc/fastp/${sample}---${unit}.html" \
+    -j "${outdir}/qc/fastp/${sample}---${unit}.json" \
+    $trim_settings
+```
+# Mapping
+2.map_bwa.GCRF.sbatch
+Now we need to map this onto the reference genome, the BCRF annotation.
+
+Get the reference over:
+```{bash}
+#either remote or SharePoint depending on what you named it when setting up rclone
+rclone copy -P --tpslimit 10 --fast-list remote:/Genetic_and_Environmental_Data/genome_files/ROFI/leucosticte_australis_final_assembly.fasta ./
+```
+
+```{bash, label="2.map_bwa.GCRF.sbatch"}
+#!/bin/bash
+#################
+#SBATCH --job-name=BWA_Dup
+#SBATCH --output=BWA-Dup.%j.out
+#SBATCH --error=BWA_Dup.%j.err
+#################
+#SBATCH -t 24:00:00
+#SBATCH --partition=amilan
+#SBATCH --qos=normal
+#SBATCH --ntasks-per-node 4
+#SBATCH --mem=16G
+#################
+#SBATCH --mail-type=END
+#SBATCH  --mail-user=ericacnr@colostate.edu
+#################
+
+#echo commands to stdout
+set -x
+
+##################;
+#run sbatch in for loop
+#now run normal batch commands within a for loop, run in folder with fastq files to assign correct plate number
+#for sample in `ls *_L7_1.trimmed.fastq | cut -f1 -d'_'`; do echo $sample;  sbatch ../2.map_bwa.GCRF.sbatch $sample ;done
+
+source ~/.bashrc
+conda activate bioinf
+
+##Variables:
+PLATE="Plate1"
+sample=$1
+lane=L7
+
+#cd ../Reference/leucosticte_australis_final_assembly.fasta
+#create index for Reference
+#bwa index  GCRF.fasta
+#samtools faidx GCRF.fasta
+
+#cd ../trimmomatic
+##Align each sample to genome. Note that genome reference must already be built through bwa
+mkdir ../bwa_mem
+
+#Note, plate is the order the plate was sequenced. 
+ID="$PLATE.$sample"
+
+#23N00512_1.trimmed.fastq
+##map paired reads
+bwa mem  -t 4 ../../Reference/leucosticte_australis_final_assembly.fasta ${sample}_$lane_1.trimmed.fastq  \
+	23N00421_$lane_2.trimmed.fastq > ../bwa_mem/aln_$lane_23N00421.sam 2> ../bwa_mem/aln_$lane_23N00421.error 
+
+cd ../bwa_mem
+
+#########sort, add read group information and index it#########
+samtools sort -o aln_"$sample".bam aln_"$sample".sam
+
+
+##Add read groups
+picard AddOrReplaceReadGroups INPUT=aln_"$sample".bam RGID="$ID" RGLB="$PLATE" RGPL=illumina.HGLGKDSX7 RGPU="$PLATE"."$sample" \
+RGSM="$sample" OUTPUT="$sample"_RG.bam VALIDATION_STRINGENCY=SILENT
+#samtools index "$sample"_RG.bam
+
+rm aln_"$sample".*
+
+
+##Removing PCR duplicates from BAM files
+#sort by name, not position
+samtools sort -n -o "$sample"_namesort.bam "$sample"_RG.bam
+
+#Add mate score tags for samtools markdup to select best reads
+samtools fixmate -m "$sample"_namesort.bam "$sample"_fixm.bam
+rm "$sample"_namesort.bam
+rm "$sample"_RG.bam
+
+
+#Sort again by posiition
+samtools sort -o "$sample"_fixm.sort.bam  "$sample"_fixm.bam
+rm "$sample"_fixm.bam
+
+#Markdups
+samtools markdup "$sample"_fixm.sort.bam "$sample"_mkdup.bam
+samtools index "$sample"_mkdup.bam
+```

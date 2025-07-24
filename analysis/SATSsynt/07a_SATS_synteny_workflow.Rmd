@@ -1,0 +1,499 @@
+---
+title: "07a_SATS_synteny"
+author: "Erica Robertson"
+date: "2025-02-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir="~/Desktop/GCRF/GCRF_Pub")
+```
+
+So this is a tedius process with the main results of having mapped all (or most) of the BCRF scaffold positions to their synonymous positions within the Zebra Finch chromosomal level assembly (using GCF_003957565.2). The reasons we do this is 1. so that when we plot the results of the GWAS and Fst we can plot them at a chromosome level, which is nicer to look at and easier to interpret biologically 2. so that we can use the Zebra finch annotation to identify genes.
+
+We also have a Leucosticte annotation (that is based on the ZEFI one) that we can directly look at. We're going to test both and see if the results are very different. The ZEFI annotation I'm using is a bit more modern/updated. But anyway, that's all for 08.gene_id stuff. For now we're just going to go through the steps to get the ZEFI and BCRF assemblies to line up.
+
+This is very time and computationally expensive stuff!!
+
+To get the ZEFI reference over...
+```{bash}
+wget https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/048/771/995/GCF_048771995.1_bTaeGut7.mat/GCF_048771995.1_bTaeGut7.mat_genomic.fna.gz 
+
+#samtools only works on bgzipped files, so just doing that now so it can be indexed later
+gunzip GCF_048771995.1_bTaeGut7.mat_genomic.fna.gz
+bgzip GCF_048771995.1_bTaeGut7.mat_genomic.fna
+```
+The reference genomes are being stored in a completely different directory:
+
+ZEFI_Reference: /scratch/alpine/ericacnr@colostate.edu/Reference/T.guttata_reference/GCF_048771995.1_bTaeGut7.mat_genomic.fna.gz
+BCRF_Reference="/scratch/alpine/ericacnr@colostate.edu/Reference/L.australis_reference/leucosticte_australis_final_assembly.fasta"
+
+So the first thing that needs to get done is to split up all of the chromosomes within the reference into separate files. I'm also going to ignore everything but the core chromsomes (noted with NC_ names), so that's all the unmapped stuff and the MT DNA.
+
+I made a list of the chromosome names called chrom_names_T.guttata.txt that looks like this:
+NC_133024.1
+NC_133025.1
+NC_133026.1
+NC_133027.1
+NC_133028.1
+NC_133029.1
+NC_133030.1
+NC_133031.1
+NC_133032.1
+NC_133033.1
+
+```{bash}
+zgrep "^>" GCF_048771995.1_bTaeGut7.mat_genomic.fna.gz | cut -d' ' -f1 | sed 's/^>//' | sort | uniq > chrom_names_T.guttata.txt
+```
+
+Note that these are the names of the chromosomes as shown in the reference. Sometimes the reference will use numbers instead, but the ncbi assembly website will note what code and number go together. I reference that a lot.
+
+I created a script that uses samtools to extract each chromosome and make it into a separate file.
+
+```{bash, label="extract_chroms.sbatch"}
+#!/bin/bash
+#SBATCH --job-name=c.split
+#SBATCH --output=c.split.%j.out
+#SBATCH --error=c.split.%j.err
+#SBATCH -t 8:00:00
+#SBATCH --partition=amilan
+#SBATCH -N 1
+#SBATCH --ntasks-per-node 6
+#SBATCH --mem=20G
+#SBATCH --mail-type=END,FAIL
+#SBATCH  --mail-user=ericacnr@colostate.edu
+
+set -x
+
+source ~/.bashrc
+conda activate bioinf
+
+# Step 1: Extract chromosome names
+chromosomes=$(cat chrom_names_T.guttata.txt)
+
+mkdir split_chroms
+
+input_genome="/scratch/alpine/ericacnr@colostate.edu/Reference/T.guttata_reference/GCF_048771995.1_bTaeGut7.mat_genomic.fna.gz"
+
+# Step 2: Loop through each chromosome and create a separate file for each one
+for chrom in $chromosomes; do
+    # Output file name based on chromosome name
+    output_file="split_chroms/${chrom}.fasta"
+
+    # Step 3: Extract the chromosome from the FASTA file and save it to a separate file
+    # Using `samtools faidx` or `grep` and `awk` method
+    samtools faidx $input_genome $chrom > $output_file
+
+    # You can also use grep and awk to achieve this if samtools is not available:
+    # zcat GCF_000151805.1_Taeniopygia_guttata-3.2.4_genomic.fna.gz | awk -v chrom="$chrom" '
+    #   BEGIN {found = 0}
+    #   /^>/ {if ($0 ~ chrom) found = 1; else found = 0}
+    #   found {print}
+    # ' > "$output_file"
+
+    echo "Extracted $chrom to $output_file"
+done
+```
+
+Now that we have each chromosome, some of them are still too big. So, I manually go in an break up the big ones (over 40mil bp). To do this I run a series of commands using a program called seqkit.
+
+```{bash}
+seqkit stats NC_044211.2.fasta
+# then I split it up into smaller 30mil or 40mil chunks...
+seqkit subseq -r 1:30000000 NC_044211.2.fasta > NC_044211.2.part1.fasta
+seqkit sebseq -r 30000001:61663524 NC_044211.2.fasta > NC_044211.2.part2.fasta
+```
+
+It's a little tedious but you can use some print functions to make it faster or, if you were more dedicated, make a script to do this. Anyway, after that I delete the original chromosome (ex NC_044211.2.fasta) and just keep the subsets so the next script doesn't try and run it too.
+
+Here's a bash scrip that will do this. Navigate into split_chroms and run from in there. Thanks ChatGPT.
+```{bash, label="subsplit_chroms.sbatch"}
+#!/bin/bash
+#SBATCH --job-name=sub.split
+#SBATCH --output=sub.split.%j.out
+#SBATCH --error=sub.split.%j.err
+#SBATCH -t 1:00:00
+#SBATCH --partition=amilan
+#SBATCH -N 1
+#SBATCH --ntasks-per-node 6
+#SBATCH --mem=20G
+#SBATCH --mail-type=END,FAIL
+#SBATCH  --mail-user=ericacnr@colostate.edu
+
+source ~/.bashrc
+conda activate bioinf
+
+# Set chunk size
+CHUNK_SIZE=30000000
+SPLIT_THRESHOLD=40000000
+
+# Loop through all .fasta files in the directory
+for fasta in *.fasta; do
+    echo "Processing $fasta..."
+
+    # Get the total length from seqkit stats
+    length=$(seqkit stats "$fasta" | awk 'NR==2 {print $5}')
+
+    # Remove commas in large numbers
+    length=${length//,/}
+
+    if (( length > SPLIT_THRESHOLD )); then
+        echo "  Length is $length bp. Splitting into $CHUNK_SIZE bp chunks..."
+
+        start=1
+        part=1
+
+        while (( start <= length )); do
+            end=$(( start + CHUNK_SIZE - 1 ))
+            if (( end > length )); then
+                end=$length
+            fi
+
+            out="${fasta%.fasta}.part${part}.fasta"
+            echo "    -> Creating $out ($start:$end)"
+            seqkit subseq -r "$start":"$end" "$fasta" > "$out"
+
+            ((start = end + 1))
+            ((part++))
+        done
+    else
+        echo "  Length is $length bp. No splitting needed."
+    fi
+done
+
+```
+
+Now we can start the SATSsyn process. From within the split_chroms directory:
+
+for j in `ls NC*`; do echo $j; sbatch 01.SATS.synteny.newSC.ZEFI.BCRF.sbatch $j; done
+
+```{bash, label="01.SATS.synteny.newSC.ZEFI.BCRF.sbatch"}
+#!/bin/bash
+#
+#SBATCH --job-name=SATSUMA2_ns
+#SBATCH --output=SATS2ns.%j.out
+#SBATCH --error=SATS2ns.%j.err
+#SBATCH -t 22:00:00
+#SBATCH --partition=amilan
+#SBATCH -N 2
+#SBATCH --ntasks-per-node 32
+#SBATCH --mem=120G
+#SBATCH --mail-type=END,FAIL
+#SBATCH  --mail-user=ericacnr@colostate.edu
+
+#echo commands to stdout
+
+#for j in `ls NC*.fasta`; do echo $j; sbatch ../01.SATS.synteny.newSC.ZEFI.BCRF.sbatch $j; done
+#running this on all the chromosomes separately so it has a chance of finishing, split them up with extract_chrom.sbatch
+
+j=$1
+
+###Identify program directories
+module load gcc/10.3.0
+
+#set the output directory
+out_dir="/scratch/alpine/ericacnr@colostate.edu/GCRF_Pub/07.SATSsynt/satsuma_out/"
+
+##set path for SatsumaSynteny2 to work- not necessary if you define path above as an object
+export SATSUMA2_PATH=/projects/ericacnr@colostate.edu/satsuma2/bin
+
+#run satsuma for each chr
+
+BCRF_ref="/scratch/alpine/ericacnr@colostate.edu/Reference/L.australis_reference/leucosticte_australis_final_assembly.fasta"
+
+$SATSUMA2_PATH/SatsumaSynteny2 -q "$BCRF_ref"  -t "$j" -o "$out_dir"ZEFI."$j".BCRF.syn
+```
+
+That will, hopefully, after running for a very long time (don't skimp on the memory or time, it'll just fail and be so annoying), you should get a directory for each chromosome. For example, we get this directory as an output: ZEFI.NC_007897.1.fasta.BCRF.syn. Within that there are a bunch of files,
+
+kmatch_results.k11  kmatch_results.k15  kmatch_results.k19  kmatch_results.k23  kmatch_results.k27  kmatch_results.k31             satsuma.log                  
+kmatch_results.k13  kmatch_results.k17  kmatch_results.k21  kmatch_results.k25  kmatch_results.k29  MergeXCorrMatches.chained.out  *satsuma_summary.chained.out*  xcorr_aligns.final.out
+
+The key one is bolded, the satsuma_summary.chained.out*. If it doesn't have that file, the process failed.
+
+The next script sorts each of those files. This one runs really quickly.
+
+run within the satsuma_out directory...
+for path in `ls ZEFI*/satsuma_summary.chained.out| cut -f1 -d'/'`; do echo $path; sbatch ../03.SATS.synteny.sort.ZEFI.sbatch $path; done
+
+```{bash, label="03.SATS.synteny.sort.ZEFI.sbatch"}
+#!/bin/bash
+#
+#SBATCH --job-name=SATSUMA2
+#SBATCH --output=SATS2.%j.out
+#SBATCH --error=SATS2.%j.err
+#SBATCH -t 1:00:00
+#SBATCH -p amilan
+#SBATCH -N 1
+#SBATCH --ntasks-per-node 4
+#SBATCH --mem=2G
+#SBATCH --mail-type=END,FAIL
+#SBATCH  --mail-user=ecn.robertson@colostate.edu
+
+#echo commands to stdout
+
+set -x
+
+###Identify program directories
+SATS2="/projects/ericacnr@colostate.edu/satsuma2/bin"
+module load gcc/10.3.0
+
+#for path in `ls ZEFI*/satsuma_summary.chained.out| cut -f1 -d'/'`; do echo $path; sbatch ../03.SATS.synteny.sort.ZEFI.sbatch $path; done
+
+path=$1
+
+$SATS2/SortSatsuma -i "$path"/satsuma_summary.chained.out > "$path"/satsuma_summary.chained.sort.out
+```
+
+Great, so now you just need to get all of those satsuma_summary.chained.sort.out concatenated together into a single file...
+
+This line makes a list of all of the files in the right chromosomal order.
+```{bash}
+ls ZEFI*fasta.BCRF.syn/satsuma_summary.chained.sort.out > order_list.txt
+```
+
+This script adds all the files together into a single output.
+```{bash, label="04.concat.sbatch"}
+#!/bin/bash
+#SBATCH --job-name=concat
+#SBATCH --output=concat.%j.out
+#SBATCH --error=concat.%j.err
+#SBATCH --time 1:00:00
+#SBATCH -p amilan
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node 4
+#SBATCH --mem=10G
+#
+set -x
+#
+output_file="satsuma_summary.chained.sort.all.ZEFI.out"
+> $output_file  Clear the file before appending
+#
+while read dir; do
+file_path="${dir}"
+if [ -f "$file_path" ]; then
+cat "$file_path" >> "$output_file"
+echo "Added $file_path to $output_file"
+else
+  echo "Warning: $file_path not found"
+fi
+done < order_list.txt
+```
+
+Now, the rest of the code you could theoretically do on your own computer, but it's not the easiest thing to run. So I run it on the cluster too. There's a bunch of stuff in here that can be fiddles with to work with whatever reference you have, but I'm just going to keep the simplest version that works for my file.
+
+For this you'll also need a file called scaffold_length.txt. That can be made like this:
+
+```{bash}
+BCRF_Reference="/scratch/alpine/ericacnr@colostate.edu/Reference/L.australis_reference/leucosticte_australis_final_assembly.fasta"
+cat $BCRF_Reference | grep ">" > scaffold_names
+cat $BCRF_Reference | grep ">" | cut -d "_" -f 8 > lengths
+paste scaffold_names lengths > scaffold_lengths
+sed 's/^>//g' scaffold_lengths > scaffold_lengths_clean
+```
+
+You can also just run the loop in the middle of this that takes forever using process_satsuma_loop.R...
+
+```{r, label="process_satsuma_full.R"}
+# A necessary function
+
+expand.indices = function(df) {
+  if (nrow(df)>1) {
+    df.expanded = apply(df,1,function(X) { return(X[1]:X[length(X)]) })
+    if (class(df.expanded)=="matrix") {
+      df.expanded = lapply(apply(df.expanded,2,list),unlist)
+    }
+    df.cat = do.call("c",df.expanded)
+  } else {
+    df.cat = df[1,1]:df[1,2]
+  }
+  return(df.cat)
+}
+
+# Read in original Satsuma output file. Note, that I haven't pre-checked this section. I process the sasuma_summary.chained.sort.out using a unix script in terminal rather than this. 
+sat = readLines("../satsuma_out/satsuma_summary.chained.sort.all.ZEFI.out")
+
+
+##########################
+
+# Read in the pre-processed file, not yet as a table and split into columns by the tab character. 
+
+library(data.table)
+library(dplyr)
+chr.map.all<-fread(".../satsuma_out/satsuma_summary.chained.sort.all.ZEFI.out", header = F,sep="\t", fill=T)
+
+#Adding in the chromosome number based on the code, tedius
+
+colnames(chr.map.all) = c("chr.code","chr.start","chr.end","sca.no","sca.start","sca.end","conserve.strength","sca.ori")
+unique(chr.map.all$chr.code)
+nrow(chr.map.all)
+
+#I had some oddities that didn't have scaffold numbers, so I removed them (wasn't very many)
+chr.map.all <- chr.map.all[chr.map.all$chr.code != "", ]
+nrow(chr.map.all)
+
+chromosome_map <- c(
+   "NC_044211.2" = "1", "NC_044212.2" = "1.1", "NC_044213.2" = "2", "NC_044214.2" = "3",
+   "NC_044215.2" = "4", "NC_044216.2" = "4.1", "NC_044217.2" = "5", "NC_044218.2" = "6",
+   "NC_044219.2" = "7", "NC_044220.2" = "8", "NC_044221.2" = "9", "NC_044222.2" = "10",
+   "NC_044223.2" = "11", "NC_044224.2" = "12", "NC_044225.2" = "13", "NC_044226.2" = "14",
+   "NC_044227.2" = "15", "NC_044228.2" = "16", "NC_044229.2" = "17", "NC_044230.2" = "18",
+   "NC_044231.2" = "19", "NC_044232.2" = "20", "NC_044233.2" = "21", "NC_044234.2" = "22",
+   "NC_044235.2" = "23", "NC_044236.2" = "24", "NC_044237.2" = "25", "NC_044238.2" = "26",
+   "NC_044239.2" = "27", "NC_044240.2" = "28", "NC_044241.2" = "28.1", "NC_045028.1" = "28.2",
+   "NC_044242.2" = "29", "NC_044243.2" = "30", "NC_054763.1" = "31", "NC_054764.1" = "32",
+   "NC_054765.1" = "33", "NC_054766.1" = "34", "NC_054767.1" = "35", "NC_054768.1" = "36",
+   "NC_054769.1" = "37"
+ )
+
+ 
+chr.map.all$chr <- chromosome_map[as.character(chr.map.all$chr.code)]
+head(chr.map.all)
+# name the columns
+chr.map <- chr.map.all %>% select(chr.code, chr, everything())
+ 
+write.table(chr.map, "satsuma_summary.chained.sort.all.ZEFI.chrnames.out", col.names=T, row.names=F, sep="\t")
+
+chr.map %>% distinct(chr.code)
+
+print("how many chromosomes there are:")
+length(unique(chr.map$sca.no))
+
+# Make into a data.frame
+chr.map = as.data.frame(chr.map)
+head(chr.map)
+
+ZLat.scafs = read.table("../scaffold_lengths_clean",header=F, sep="\t")
+colnames(ZLat.scafs) <- c("scaffold","length")
+head(ZLat.scafs)
+nrow(ZLat.scafs %>% distinct(scaffold))
+
+chr.map2<-chr.map %>% mutate(sca.ori2=if_else(sca.ori=="+",1,-1)) %>% dplyr::select(-sca.ori) %>% rename(sca.ori=sca.ori2)
+chr.map = chr.map2
+
+chr.map$len.sca.chunk = chr.map$sca.end-chr.map$sca.start
+chr.map$sca.length = ZLat.scafs$length[match(chr.map$sca.no,ZLat.scafs$scaffold)]
+chr.map$prop.of.sca = chr.map$len.sca.chunk/chr.map$sca.length
+
+head(chr.map)
+
+# Write to csv
+write.csv(chr.map, "chr.mapAssembled.BCRF.ZEFInew.csv")
+
+
+#------------------------------
+#STEP 3: CREATING SCA.CHROM.MAP
+library(dplyr)
+# load in necessary files:
+chr.map = read.csv("chr.mapAssembled.BCRF.ZEFInew.csv",stringsAsFactors = F)
+
+ZLat.scafs = read.table("../scaffold_lengths_clean",header=F, sep="\t")
+colnames(ZLat.scafs) <- c("scaffold","length")
+
+expand.indices = function(df) {
+  if (nrow(df)>1) {
+    df.expanded = apply(df,1,function(X) { return(X[1]:X[length(X)]) })
+    if (class(df.expanded)=="matrix") {
+      df.expanded = lapply(apply(df.expanded,2,list),unlist)
+    }
+    df.cat = do.call("c",df.expanded)
+  } else {
+    df.cat = df[1,1]:df[1,2]
+  }
+  return(df.cat)
+}
+
+sca.chrom.map = data.frame(ZLat.scaffold=ZLat.scafs$scaffold,best.ZFinch.chrom=NA,mean.loc.ZFinch.chrom=NA,ori=NA,prop.of.scaf=NA)
+
+split.scaffolds = list()
+
+for (i in 1:nrow(ZLat.scafs)) {
+  sca = ZLat.scafs$scaffold[i]
+  print(paste("Processing scaffold:", sca))
+  chr.sca = chr.map[chr.map$sca.no==sca,]
+  chr.sca = chr.sca[order(chr.sca$sca.start),]
+  # get chromosome with most coverage of scaffold
+  chr.cov = tapply(chr.sca$prop.of.sca,chr.sca$chr,sum)
+  chr.cov = chr.cov[chr.cov>0.2]
+  # If more than one chromosome mapped to over 20% of the scaffold's length, save it here for examination
+  if (length(chr.cov)>1) { 
+    split.scaffolds = c(split.scaffolds,list(rbind(paste(unique(chr.sca$sca)),round(chr.cov,2))))
+  } 
+  if (length(chr.cov)==0) {
+    sca.chrom.map$best.ZFinch.chrom[i] = sca.chrom.map$mean.loc.ZFinch.chrom[i] = sca.chrom.map$ori[i] = sca.chrom.map$prop.of.scaf[i] = NA
+  } else { # all good
+    chr.max = names(chr.cov[chr.cov==max(chr.cov)])
+    # take weighted mean of position by coverage on chromsome
+    chr.sca = chr.sca[chr.sca$chr==chr.max,]
+    mean.pos = mean(expand.indices(chr.sca[,c("chr.start","chr.end")]))
+    stopifnot(sca.chrom.map$ZLat.scaffold[i]==sca)
+    sca.chrom.map$best.ZFinch.chrom[i] = chr.max
+    sca.chrom.map$mean.loc.ZFinch.chrom[i] = mean.pos
+    sca.chrom.map$prop.of.scaf[i] = max(chr.cov)
+    ori.mean = weighted.mean(chr.sca$sca.ori,chr.sca$prop.of.sca)
+    if (ori.mean>0) { 
+      sca.chrom.map$ori[i] = 1
+    } else {
+      sca.chrom.map$ori[i] = -1
+    }
+  }
+  print(nrow(ZLat.scafs)-i)
+}
+
+sca.chrom.map = sca.chrom.map[complete.cases(sca.chrom.map),]
+write.csv(sca.chrom.map,"BCRF_scaffold_chrom_map_ZFinchnew.csv",row.names=F)
+
+sca.chrom.map <- read.csv("BCRF_scaffold_chrom_map_ZFinchnew.csv")
+head(sca.chrom.map$best.ZFinch.chrom)
+unique(sca.chrom.map$best.ZFinch.chrom)
+
+sca.chrom.map = sca.chrom.map[order(o,sca.chrom.map$mean.loc.ZFinch.chrom),]
+sca.chrom.map = sca.chrom.map[order(sca.chrom.map$best.ZFinch.chrom,sca.chrom.map$mean.loc.ZFinch.chrom),]
+write.csv(sca.chrom.map,"BCRF_scaffold_chrom_map_ZEFI_Un_new.csv",row.names=F)
+
+
+#------------------------------
+#STEP 4: ORDERING SCA.CHROM.MAP & SAVING OUTPUT FILE
+
+sca.chrom.map <- read.csv("BCRF_scaffold_chrom_map_ZEFI_Un_new.csv")
+
+# measuring length of successfully mapped scaffolds and comparing it to the total length of the included scaffolds
+print("percent successfully mapped:")
+sum(ZLat.scafs$length[match(as.character(sca.chrom.map$ZLat.scaffold),ZLat.scafs$scaffold)])/sum(ZLat.scafs$length)
+
+head(sca.chrom.map)
+
+scaffold.order = sca.chrom.map[,c("best.ZFinch.chrom","ZLat.scaffold","mean.loc.ZFinch.chrom","ori")]  
+colnames(scaffold.order) = c("chr","sca","mean.loc","sca.ori")
+head(scaffold.order)
+
+unique(scaffold.order$chr)
+
+write.csv(scaffold.order,"BCRF_scaffold_order_from_ZEFI_new_Un.csv",row.names=F)
+```
+
+Run that whole thing with:
+
+```{bash, label="process_satsuma_full.sbatch"}
+#!/bin/bash
+#SBATCH --job-name=procSATS
+#SBATCH --output=procSTATS.%j.out
+#SBATCH --error=procSTATS.%j.err
+#SBATCH -t 8:00:00
+#SBATCH -p amilan
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node 24
+#SBATCH --mem=90G
+#SBATCH --mail-type=END,FAIL
+#SBATCH  --mail-user=ericacnr@colostate.edu
+
+
+set -x
+source ~/.bashrc
+
+conda activate R
+
+Rscript --vanilla process_satsuma_full.R
+```
+

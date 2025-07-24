@@ -1,0 +1,205 @@
+---
+title: "07b_reordering_outputs"
+author: "Erica Robertson"
+date: "2025-02-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir="~/Desktop/GCRF/GCRF_Pub")
+```
+
+Now that we have the BCRF_scaffold_order_from_ZEFI_new_Un.csv file, we can use this to reorder the output files from our lmm, bslmm, and fst analysis. This will allow for plotting and identification of genes.
+
+First, lets get that file over here.
+```{bash}
+rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/GCRF_Pub/07.SATSsynt/process_satsuma/BCRF_scaffold_order_from_ZEFI_new_Un.csv /Users/ericarobertson/Desktop/GCRF/GCRF_Pub/analysis/SATSsynt
+
+rsync -avzP ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/GCRF_Pub/07.SATSsynt/scaffold_lengths_clean /Users/ericarobertson/Desktop/GCRF/GCRF_Pub/analysis/SATSsynt
+```
+
+For the lmm and bslmm, we're just going to reorder the output files that had significant snps (aka, those that we might want to actually plot in the end). So this does a check first for those outlier tally files from the 05b_GWAS_analysis.Rmd outputs and, if they exist, it reads in the bigger assoc file and reorders that snps based on the satsuma output. This is a little intense but I can usually run it on my own computer.
+
+```{r, echo=FALSE}
+library(tidyr)
+library(data.table)
+library(dplyr)
+library(readr)
+```
+
+```{r, label="reorder_lmm"}
+#created in previous script
+scaff_ord <- read_csv("analysis/SATSsynt/BCRF_scaffold_order_from_ZEFI_new_Un.csv") %>%
+  rename(scaffold = sca)
+scaff_lengths <- read_tsv("analysis/SATSsynt/scaffold_lengths_clean",col_names =F) %>% rename(scaffold=X1,length=X2)
+
+missing_lengths <- anti_join(scaff_ord, scaff_lengths)
+
+missing_ords <- anti_join(scaff_lengths, scaff_ord)
+
+
+scaffs <- scaff_ord %>%
+  left_join(scaff_lengths) %>%
+  rename(ZFCHROM = chr, CHROM = scaffold)
+scaffs
+
+traits <- c("wing_chord", "tail", "nare", "beak_length", 
+            "beak_depth", "beak_width", "pen_length", "pen_num", 
+            "plum_length", "plum_num", "nodes")
+
+miss <- "0.5"
+
+for (trait in traits) {
+  #Just want to reorder the files for traits that had significant SNPs, this saves space ass all the reordered files are large
+  snp_file_path <- paste0("results/lmm_results/GCRF_merged.SNP.filtered_",miss,"_",trait,"_soft_lmm.outlier_tally.csv")
+    if (!file.exists(snp_file_path)) {
+      print(paste(trait, miss, "doesn't exist"))
+      next
+    }
+  file_path <- paste0("results/lmm_output/GCRF_merged.SNP.filtered_",miss,"miss_",trait,"_soft_lmm.assoc.txt")
+  vcf <- read_tsv(file_path, comment = "##", progress = FALSE) %>% rename(CHROM=chr, POS=ps)
+  combo <- scaffs %>%
+  left_join(vcf)
+  combo <- combo[complete.cases(combo),]
+  
+  zf_ified <- combo %>%
+  mutate(ZFPOS = {
+    ML = floor(mean.loc)  # some temp variables to make it easier to express
+    Lo2 = floor(length/2)
+    L = length
+    ifelse(sca.ori == 1,
+           ML - Lo2 + POS,           # forward orientation
+           ML - Lo2 + (L - POS))     # reverse orientation
+  }) %>%
+  dplyr::select(ZFCHROM, ZFPOS, everything()) %>%
+  mutate(ZFCHROM = factor(ZFCHROM, levels = unique(ZFCHROM))) %>%   # this is to get them to sort correctly
+  arrange(ZFCHROM, ZFPOS)
+  
+  zf_ified %>% distinct(ZFCHROM) %>% print(n=40)
+  zf_ified
+  
+  zf_ified$CHROM <- NULL
+  zf_ified$POS <- NULL
+  zf_ified$mean.loc <- NULL
+  zf_ified$sca.ori <- NULL
+  zf_ified$length <- NULL
+
+  colnames(zf_ified)[1] <- "CHROM"
+  colnames(zf_ified)[2] <- "POS"
+  dim(zf_ified)
+
+  #Filter so that negative positions and unmapped scaffolds are removed:
+  zf_ified <- filter(zf_ified, POS > 0)
+  file_name <- paste0("figures/reordered_files/",trait,miss,"_soft.lmm_ZFchr_assoc_new.txt")
+  print(file_name)
+  zf_ified %>% write_delim(file_name, quote = "none" ,delim = "\t", col_names = T)
+}
+```
+
+For the bslmm we do a similar thing! We do have to specify what threshold we're interested in, so review the results and see what you wanna go with.
+
+```{r, label="reorder_bslmm"}
+#created in previous script
+scaff_ord <- read_csv("analysis/SATSsynt/BCRF_scaffold_order_from_ZEFI_new_Un.csv") %>%
+  rename(scaffold = sca)
+scaff_lengths <- read_tsv("analysis/SATSsynt/scaffold_lengths_clean",col_names =F) %>% rename(scaffold=X1,length=X2)
+
+missing_lengths <- anti_join(scaff_ord, scaff_lengths)
+
+missing_ords <- anti_join(scaff_lengths, scaff_ord)
+
+
+scaffs <- scaff_ord %>%
+  left_join(scaff_lengths) %>%
+  rename(ZFCHROM = chr, CHROM = scaffold)
+scaffs
+
+traits <- c("wing_chord", "tail", "nare", "beak_length", 
+            "beak_depth", "beak_width", "pen_length", "pen_num", 
+            "plum_length", "plum_num", "nodes")
+
+miss <- "0.5"
+
+i <- "0.01"
+
+for (trait in traits) {
+  #Just want to reorder the files for traits that had significant SNPs, this saves space ass all the reordered files are large
+  snp_file_path <- paste0("results/bslmm_results/",trait, miss ,"_pip",i,"_soft.csv")
+    if (!file.exists(snp_file_path)) {
+      print(paste(trait, miss, "doesn't exist"))
+      next
+    }
+  file_path <- paste0("results/bslmm_output/GCRF_merged.SNP.filtered_",miss,"miss_",trait,"_soft_bslmm.param.txt")
+  vcf <- read_tsv(file_path, comment = "##", progress = FALSE) %>% rename(CHROM=chr, POS=ps)
+  combo <- scaffs %>%
+  left_join(vcf)
+  combo <- combo[complete.cases(combo),]
+  zf_ified <- combo %>%
+  mutate(ZFPOS = {
+    ML = floor(mean.loc)  # some temp variables to make it easier to express
+    Lo2 = floor(length/2)
+    L = length
+    ifelse(sca.ori == 1,
+           ML - Lo2 + POS,           # forward orientation
+           ML - Lo2 + (L - POS))     # reverse orientation
+  }) %>%
+  dplyr::select(ZFCHROM, ZFPOS, everything()) %>%
+  mutate(ZFCHROM = factor(ZFCHROM, levels = unique(ZFCHROM))) %>%   # this is to get them to sort correctly
+  arrange(ZFCHROM, ZFPOS)
+  #Filter so that negative positions and unmapped scaffolds are removed:
+  zf_ified <- filter(zf_ified, POS >0)
+  file_name <- paste0("figures/reordered_files/",trait,miss,".",i,"_soft.bslmm_ZFchr_params.txt")
+  print(file_name)
+  zf_ified %>% write_delim(file_name, quote = "none" ,delim = "\t", col_names = T)
+}
+```
+
+The fst results are a little trickier, and this might be worth running on the cluster because my computer at least had trouble reading in the files...
+
+```{r, label="reorder_fst"}
+scaff_ord <- fread("analysis/SATSsynt/BCRF_scaffold_order_from_ZEFI_new_Un.csv") %>%
+  rename(scaffold = sca)
+scaff_lengths <- read.table("analysis/SATSsynt/scaffold_lengths_clean") %>% rename(scaffold=V1,length=V2)
+
+missing_lengths <- anti_join(scaff_ord, scaff_lengths)
+
+missing_ords <- anti_join(scaff_lengths, scaff_ord)
+
+map.file <- fread("analysis/gene_id/GCRF_merged.SNP.filtered_0.8miss_loc.map")
+colnames(map.file) <- c("CHROM", "rs", "X", "pos")
+
+  
+scaffs <- scaff_ord %>%
+  dplyr::left_join(scaff_lengths) %>%
+  dplyr::rename(ZFCHROM = chr, CHROM = scaffold)
+colnames(scaffs)
+
+file_path <- paste0("analysis/Fst/OutFLANK_output/OutFLANK_fst_results_0.005.csv")
+fst <- fread(file_path)
+
+fst_snps_chr <- left_join(fst, map.file, by="rs")
+
+combo <- scaffs %>%
+left_join(fst_snps_chr)
+combo <- combo[complete.cases(combo),]
+zf_ified <- combo %>%
+  mutate(ZFPOS = {
+    ML = floor(mean.loc)  # some temp variables to make it easier to express
+    Lo2 = floor(length/2)
+    L = length
+    ifelse(sca.ori == 1,
+           ML - Lo2 + pos,           # forward orientation
+           ML - Lo2 + (L - pos))     # reverse orientation
+    }) %>%
+  dplyr::select(ZFCHROM, ZFPOS, everything()) %>%
+  mutate(ZFCHROM = factor(ZFCHROM, levels = unique(ZFCHROM))) %>%   # this is to get them to sort correctly
+  arrange(ZFCHROM, ZFPOS)
+  
+#Filter so that negative positions and unmapped scaffolds are removed:
+zf_ified <- filter(zf_ified, ZFPOS >0)
+file_name <- paste0("figures/reordered_files/OutFLANK_fst_results_0.005_ZFchr.txt")
+print(file_name)
+zf_ified %>% write_delim(file_name, quote = "none" ,delim = "\t", col_names = T)
+
+```

@@ -1,0 +1,396 @@
+---
+title: "05_GWAS_workflow"
+author: "Erica Robertson"
+date: "2025-01-31"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir="~/Desktop/GCRF/GCRF_Pub/")
+```
+
+This is a walk through of the steps I did to run my GWAS for this publication:
+
+The titles of each sections are the steps I took and also, for the first level titles, the directory I am in when running the code.
+
+*Before doing any of this though!!*
+A good idea is to evaluate population structure before going through the following process. That in analysis/03_pop_structure.Rmd. The advantage here is you can evaluate for batch effect and weird things, and also remove any super related individuals. The removing related individuals is a little redundant because GEMMA controls for population structure/relatedness through the inclusion of a relatedness matrix as a covariate, but I thought it would be a good idea to just take out one individual from the pair I found.
+
+# 02.imputation
+BEAGLE 4.1 Imputation
+
+GEMMA can't work on missing data, so you either have to filter out SNPs where any individuals are missing genotypes (which could results in a significant reduction in the number of SNPs you're working with) or you can impute missing genotypes. I went with the later because I had a high depth and so felt better about the accuracy of the missing genotypes post imputation.
+
+This BEAGLE imputation was done using the GWAS01.impute.sbatch script.
+
+```{bash, label="02.imputation.sbatch"}
+#!/bin/bash
+#
+#SBATCH --job-name=impute
+#SBATCH --output=impute.%j.out
+#SBATCH --error=impute.%j.err
+#SBATCH -t 24:00:00
+#SBATCH --partition=amilan
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node 24
+#SBATCH --mem=90G
+#SBATCH --mail-type=END,FAIL
+#SBATCH  --mail-user=ericacnr@colostate.edu
+
+#echo commands to stdout
+
+set -x
+source ~/.bashrc
+
+BEAGLE_JAR="/projects/ericacnr@colostate.edu/mambaforge/envs/bioinf/java/beagle.27Jan18.7e1.jar"
+vcf="/scratch/alpine/ericacnr@colostate.edu/GCRF_Pub/01.fastq_processing/ROFI.10x.pass-maf-0.05.SNP.biallelic.8miss.rmdup.rename.vcf.gz"
+
+java -Xss5m -Xmx90g -jar $BEAGLE_JAR \
+  gt=$vcf \
+  out=GCRF_merged.SNP.filtered_0.5miss_imputed4.1 \
+  nthreads=48
+```
+
+I like to just double check that nothing weird happened by making sure the of number of snps didn't change.
+
+```{bash}
+#count the number of SNP lines
+bcftools stats GCRF_merged.SNP.filtered_0.8miss_imputed4.1.vcf.gz > GCRF_merged.SNP.filtered_0.8miss_imputed4.1.stats
+```
+
+Comparing that to the summary stats for the original .vcf.gz file, we get the same number.
+
+Sometimes, there are duplications. So you could apply a line of code like this to remove them:
+
+```{bash}
+FASTA="/scratch/alpine/ericacnr@colostate.edu/GCRF/Reference/BCRF/leucosticte_australis_final_assembly.fasta"
+bcftools norm -d none -f $FASTA  GCRF_merged.SNP.filtered_0.8miss_imputed4.1.vcf.gz > GCRF_merged.SNP.filtered_0.5miss_nodup.vcf
+```
+## renaming the samples
+
+So the file that CH gave me has a couple individuals named "_novo". So I'm going to rename all the individuals so the sample names make sense.
+
+```{bash}
+bcftools reheader \
+  --samples rename.txt \
+  -o GCRF_merged.SNP.filtered_0.5miss_imputed4.1_rename.vcf.gz \
+  GCRF_merged.SNP.filtered_0.5miss_imputed4.1.vcf.gz
+```
+
+#03.GWAS_input
+
+Now we're going to make the input files for GEMMA. 
+
+## text files
+The first thing we have to do in reformat the phenotypes data a bit so it's read correctly by GEMMA. We want a file that is just the phenotype data, nothing else. It should also be tab deliminator.
+
+Reading in the data from the residuals created in analysis/stats/01_body_size_corrections.Rmd. This data has all of the residuals from every individual samples, not just the ones that I have sequence data for. So the first step is to isolate the sequenced individuals.
+```{r}
+residuals <- read.csv("results/stats_output/GCRF_residuals_all_soft.csv")
+# residuals <- read.csv("results/stats_output/GCRF_residuals_all.csv")
+
+#this is a list extracted from the vcf that has all the sample BGP_IDs
+sample.list <- read.table("data/sample_list.txt") %>% rename(BGP_ID = V1)
+
+seq.res <- left_join(sample.list, residuals, by="BGP_ID")
+
+#just to double check, this should be the total number of individuals that we have sequenced
+nrow(seq.res)
+```
+
+The first thing I'm going to do is go ahead and make the site_codes numeric. This is the format that a .ped file should be in.
+
+```{r}
+seq.res <-  seq.res %>%
+  mutate(site_code=case_when(
+    site_code == "WMTN" ~ "1",
+    site_code == "PIPA" ~ "2",
+    site_code == "VILA" ~ "3",
+    site_code == "WHPE" ~ "4",
+    site_code == "KELA" ~ "5",
+    TRUE ~ site_code
+  ))
+```
+
+Great, now that the data is in an isolated, time to make some input files. The first file we're going to make in the remove.txt file, which I actually made by hand (gross, I know). This include the BGP_ID's and site_code (numeric) for each individual I want to remove. This is going to be 14 birds, those from the VILA, WHPE, and KELA location and two others who either have missing morpho data and so are useless (23N00557) or are highly related to anther individuals (23N00550). That file is now in analysis/GWAS/remove.txt.
+
+Next I'm going to make the phenotypes_res.txt file that will be put into GEMMA. I'm going to remove the individuals I want to ignore (23N00557 is already gone from this file, did that at the very start). Then I'm going to isolate just the phenotype data, or the residuals of that data for accurately. The phenotype file should just be a row for each trait, in a specific order, but with no sample ID. Each row corresponds to a sample in numeric order for that phenotype.
+
+Here is the order the traits need to be in for the GWAS:
+traits=("wing_chord" "tail" "nare" "beak_length" "beak_depth" "beak_width" "pen_length" "pen_num" "plum_length" "plum_number" "nodes")
+
+```{r}
+#removing the other locations
+seq.res.subset <- seq.res %>% filter(site_code %in% c("1", "2"))
+#removing 23N00550
+seq.res.subset <- seq.res.subset[-141,]
+
+#146 is the number we want!
+nrow(seq.res.subset)
+
+colnames(seq.res.subset)
+
+phenotypes <- seq.res.subset %>% select(-BGP_ID, -band_number, -age, -sex, -site_code)
+colnames(phenotypes)
+phenotypes <- phenotypes %>% select(wing_chord_res, tail_length_res, nare_length_res, culmen_end_length_res, everything())
+
+# write.table(phenotypes, "analysis/GWAS/phenotypes_res.txt", col.names = F, row.names = F, quote = F, sep = "\t")
+write.table(phenotypes, "analysis/GWAS/phenotypes_res_soft.txt", col.names = F, row.names = F, quote = F, sep = "\t")
+```
+
+Now we just need a datasheet that has the sexes for each individual to add those to the .ped file...
+For this file we need the site_code (numerical) the BGP_ID and the sex (numerical)
+
+```{r}
+sex <- seq.res.subset %>% mutate(
+  sex = case_when(
+    sex == "M" ~ "1",
+    sex == "F" ~ "2",
+    sex == "UNK" ~ "0"
+  )
+)
+
+sex <- sex %>% select(site_code, BGP_ID, sex)
+
+write.table(sex, "analysis/GWAS/sex.txt", col.names = F, row.names = F, quote = F, sep = "\t")
+```
+
+The last file we need to make is a recode file. This file will allow us to add the correct site locations, as right now they're going to be filled in with the BGP_IDs. The format for this file is going to be the original FID, original IID, new FID, new IID. The FID is the site code and the IID is the BGP_ID.
+
+We're going to include all the extra samples here, as we'll do the recode and the remove in the same PLINK command next.
+
+```{r}
+colnames(seq.res)
+
+recode <- as.data.frame(cbind(seq.res$BGP_ID, seq.res$BGP_ID, seq.res$site_code, seq.res$BGP_ID))
+View(recode)
+
+write.table(recode, "analysis/GWAS/recode.txt", col.names = F, row.names = F, quote = F, sep = "\t")
+```
+
+Sweet. Now just gotta dump those files on the cluster...
+
+```{bash}
+rsync -avzP /Users/ericarobertson/Desktop/GCRF/GCRF_Pub/analysis/GWAS/*.txt ericacnr@colostate.edu@login.rc.colorado.edu:/scratch/alpine/ericacnr@colostate.edu/GCRF_Pub/03.GWAS_input/
+```
+
+## .ped and .map files
+
+Next, we have to make the .ped and .map files with PLINK. This is a super simple process, normally. For us though I have to do a couple extra things to remove the right individuals, give each individual the correct FID (site code), and add the sex for each individuals.
+
+I do all of the following commands in the interactive window, not through a script. They're not very time or memory intensive.
+
+First though, lets do the recode and the remove. Another thing to note here is the --aec or allow-extra-chroms flag. This means that PLINK won't freak out when it sees the Scaffold names instead of typical chromosome number....
+
+*THE NEW IMPUTED FILE IS MISNAMED 0.5MISS!! TESTING WITH THE 0.8MISS BUT NEED TO GO BACK AND CORRECT ONCE ACTUAL FILE EXISTS*
+```{bash}
+plink --vcf ../02.imputation/GCRF_merged.SNP.filtered_0.5miss_imputed4.1_rename.vcf.gz --update-ids recode.txt --aec --recode --remove remove.txt --out GCRF_merged.SNP.filtered_0.5miss
+```
+
+Right now the .map file doesn't have anything for the unique snp id column, so we're going to manually add in the rs values. I like to have them formatted as Scaffold#.snppos.
+
+```{bash}
+cat GCRF_merged.SNP.filtered_0.5miss.map | awk -F"\t" '{split($1, a, "__"); print $1"\t"a[1]"."$4"\t"$3"\t"$4}' > GCRF_merged.SNP.filtered_0.5miss_loc.map
+```
+
+If you want to double check the .ped file, you can check the number of columns...should have number of rows = number of SNPs * 2 plus 6
+```{bash}
+head -n 1 GCRF_merged.SNP.filtered_0.5miss.ped | awk -F' ' '{print NF}'
+```
+
+And if you want to look at it to check the format of the FID and IID, etc, you can open it with this line:
+
+```{bash}
+head GCRF_merged.SNP.filtered_0.5miss.ped | less -S
+```
+
+Just be sure to use the less -S after a pipe or it will read out every genotypes! The less -S prevent it from wrapping so you can look at the start of each row (which is for each individual).
+
+The last check is the number of lines with wc -l. Should be 147, or whatever number of samples you expected after the remove.
+
+```{bash}
+cat GCRF_merged.SNP.filtered_0.5miss.ped | wc -l
+```
+
+## making the bfiles
+
+Great, so now our .ped file and .map file are all set. Now we need to make the .bed .bim and .fam files which are what actually go into GEMMA.
+
+We're going to do this in two steps. The first is to make the files. Make sure you include the right .map file here or the rs values will be messed up, and you need the -aec flag again.
+
+```{bash}
+plink --ped GCRF_merged.SNP.filtered_0.5miss.ped \
+--map GCRF_merged.SNP.filtered_0.5miss_loc.map \
+--make-bed --aec \
+--out GCRF_merged.SNP.filtered_0.5miss_temp
+```
+
+Then we're going to add the sex information for each individual.
+
+```{bash}
+plink --bfile GCRF_merged.SNP.filtered_0.5miss_temp \
+--aec \
+--update-sex sex.txt \
+--make-bed --out GCRF_merged.SNP.filtered_0.5miss
+```
+
+You can check the .fam file to make sure everything went correctly.
+
+1 19N00121 0 0 2 -9
+1 19N00122 0 0 2 -9
+1 19N00123 0 0 1 -9
+1 19N00124 0 0 2 -9
+1 19N00125 0 0 2 -9
+1 19N00126 0 0 2 -9
+1 19N00127 0 0 1 -9
+1 19N00128 0 0 1 -9
+
+
+#relatedness matrix
+
+The last thing we need is the relatedness matrix. We're going to create it using GEMMA but keep it in this 03.GWAS_input directory, under a subdirectory output (this is the default for GEMMA).
+
+I run this in the acompile node...
+
+Loading the dependencies and the GWAS conda environment.
+
+```{bash}
+acompile
+module load gcc/10.3.0
+module load openmpi
+conda activate GWAS2
+```
+
+```{bash}
+/projects/ericacnr@colostate.edu/GEMMA/bin/gemma \
+-bfile GCRF_merged.SNP.filtered_0.5miss \
+-gk 1 -p phenotypes_res.txt -o GCRF_relate
+```
+
+The relatedness matrix will be included in both the lmm and bslmm models as a covariate to account for relatedness and population structure.
+
+Now we're ready to run the actually GWAS models!
+
+#04.lmm
+
+Let's do the lmm first.
+
+The basic code looks like this:
+
+```{bash}
+#calling the gemma program from wherever you installed in and giving the input files
+/projects/ericacnr@colostate.edu/GEMMA/bin/gemma -bfile GCRF_merged.SNP.filtered_0.8miss \
+#this is the relatedness matrix we created before
+-k ../03.GWAS_input/output/GCRF_relate.cXX.txt \
+#the phenotype files with the -n flag indicating which column (trait) you want to run it with
+-p ../03.GWAS_input/phenotypes_raw.txt -n 1\
+#This is the univariate linear mixed model (lmm instead of lmm) running the Wald test, and the output we want
+-lmm 4 -o GCRF_merged.SNP.filtered_0.5miss_lmm_trait
+```
+
+For the actual job I run it as a for loop that cycles through all of the traits (in the same order as the phenotype file) and automatically names all the outputs. It's tidier than running a separate one manual for each trait. The sbatch submission also can flexibly change based on the missingness filter (like if you did 0.5 instead of 0.8).
+
+```{bash, label="GWAS02.all_morpho_lmm.sbatch"}
+#!/bin/bash
+#
+#SBATCH --job-name=lmm
+#SBATCH --output=lmm.%j.out
+#SBATCH --error=lmm.%j.err
+#SBATCH -t 8:00:00
+#SBATCH -p amilan
+#SBATCH --nodes=1
+#SBATCH --mem=16G
+#SBATCH --mail-type=END,FAIL
+#SBATCH  --mail-user=ericacnr@colostate.edu
+
+#echo commands to stdout
+
+source ~/.bashrc
+set -x
+
+module load gcc/10.3
+module load openmpi
+
+conda activate GWAS2
+
+num="$1"
+
+traits=("wing_chord" "tail" "nare" "beak_length" "beak_depth" "beak_width" "pen_length" "pen_num" "plum_length" "plum_num" "nodes")
+
+# Loop over each trait
+for i in $(seq 1 ${#traits[@]}); do
+    trait_name=${traits[$((i - 1))]}  # Get the trait name for the current column
+    /projects/ericacnr@colostate.edu/GEMMA/bin/gemma -bfile ../03.GWAS_input/GCRF_merged.SNP.filtered_"$num"miss \
+        -k ../03.GWAS_input/output/GCRF_relate.cXX.txt \
+        -p ../03.GWAS_input/phenotypes_res.txt -n $i \
+        -lmm 4 -o GCRF_merged.SNP.filtered_"$num"miss_${trait_name}_lmm
+done
+```
+
+Run like this: sbatch GWAS02.all_morpho_lmm.sbatch 0.5
+
+#05.bslmm
+
+Next, let's do the bslmm
+
+The basic code looks like this:
+
+```{bash}
+/projects/ericacnr@colostate.edu/GEMMA/bin/gemma -bfile ../03.GWAS_input/GCRF_merged.SNP.filtered_0.8miss \
+-k ../03.GWAS_input/output/GCRF_relate.cXX.txt \
+-p phenotypes_res.txt -n 1 \
+#here we're specifying some parameters, -w in the number of burn-ins that are discarded, -s is the number of sampling iterations that will be saved
+-w 500000 -s 5000000 \
+#bslmm 1 fits a linear BSLMM using MCMC
+-bslmm 1 -o GCRF_merged.SNP.filtered_0.8miss_trait_bslmm
+```
+
+The actual job is run as a loop, as before.
+
+```{bash, label="GWAS02.all_morpho_bslmm.sbatch"}
+#!/bin/bash
+#
+#SBATCH --job-name=bslmm
+#SBATCH --output=bslmm.%j.out
+#SBATCH --error=bslmm.%j.err
+#SBATCH -t 8:00:00
+#SBATCH -p amilan
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node 24
+#SBATCH --mem=90G
+#SBATCH --mail-type=END,FAIL
+#SBATCH  --mail-user=ericacnr@colostate.edu
+
+#echo commands to stdout
+
+set -x
+
+source ~/.bashrc
+
+module load gcc/10.3
+module load openmpi
+
+conda activate GWAS2
+
+num="$1"
+
+traits=("wing_chord" "tail" "nare" "beak_length" "beak_depth" "beak_width" "pen_length" "pen_num" "plum_length" "plum_num" "nodes")
+
+# Loop over each trait
+for i in $(seq 1 ${#traits[@]}); do
+    trait_name=${traits[$((i - 1))]}
+    /projects/ericacnr@colostate.edu/GEMMA/bin/gemma -bfile ../03.GWAS_input/GCRF_merged.SNP.filtered_"$num"miss \
+        -k ../03.GWAS_input/output/GCRF_relate.cXX.txt \
+        -p ../03.GWAS_input/phenotypes_res.txt -n $i \
+        -w 500000 -s 5000000 \
+        -bslmm 1 -o GCRF_merged.SNP.filtered_"$num"miss_${trait_name}_bslmm
+done
+```
+
+Run like this: sbatch GWAS02.all_morpho_bslmm.sbatch 0.5
+
+
+
+
+

@@ -1,0 +1,142 @@
+---
+title: "07c_NUCmer"
+author: "Erica Robertson_CH updated"
+date: "2025-06-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir="~/Desktop/GCRF/GCRF_Pub")
+```
+
+CH worked with NUCmer to create a new reorder file: BCRF_scaffold_order_from_ZEFI1.4_41_noUn_new.csv. We can use this to reorder the output files from our lmm, bslmm, and fst analysis. This will allow for plotting and identification of genes, hopefully with fewer lost SNPs than before
+
+For the lmm and bslmm, we're just going to reorder the output files that had significant snps (aka, those that we might want to actually plot in the end). So this does a check first for those outlier tally files from the 05b_GWAS_analysis.Rmd outputs and, if they exist, it reads in the bigger assoc file and reorders that snps based on the satsuma output. This is a little intense but I can usually run it on my own computer.
+
+```{r, echo=FALSE}
+library(tidyr)
+library(data.table)
+library(dplyr)
+library(readr)
+library(vroom)
+```
+
+```{r, label="reorder_lmm"}
+#created in previous script
+scaff_ord <- read_csv("analysis/SATSsynt/BCRF_scaffold_order_from_ZEFI1.4_41_noUn_new.csv") %>%
+  rename(scaffold = sca) %>% arrange(chr,mean.loc)
+scaff_lengths <- read_tsv("analysis/SATSsynt/scaffold_lengths_clean",col_names =F) %>% rename(scaffold=X1,length=X2)
+
+missing_lengths <- anti_join(scaff_ord, scaff_lengths) 
+
+missing_ords <- anti_join(scaff_lengths, scaff_ord)
+
+
+scaffs <- scaff_ord %>%
+  left_join(scaff_lengths) %>%
+  rename(ZFCHROM = chr, CHROM = scaffold)
+scaffs
+
+```
+ 
+```{r}
+vcf <-read_tsv("bslmm_top1eff.nare.imputed.CHtest.txt") %>% rename(CHROM=chr,POS=ps) %>% mutate(rs2=paste(CHROM,POS,sep="."))
+
+combo <- scaffs %>%
+  left_join(vcf) #%>% dplyr::select(-region,-Nsites)
+
+#same order as ped file
+#combo <- vcf %>% left_join(scaffs) 
+#tail(combo)
+#options(scipen = 999)
+
+zf_ified <- combo %>%
+  mutate(ZFPOS = {
+    ML = floor(mean.loc)  # some temp variables to make it easier to express
+    Lo2 = floor(length/2)
+    L = length
+    ifelse(sca.ori == 1,
+           ML - Lo2 + POS,           # forward orientation
+           ML - Lo2 + (L - POS))     # reverse orientation
+  }) %>%
+  dplyr::select(ZFCHROM, ZFPOS, everything()) %>%
+  mutate(ZFCHROM = factor(ZFCHROM, levels = unique(ZFCHROM))) %>%   # this is to get them to sort correctly
+  arrange(ZFCHROM, ZFPOS)
+
+
+zf_ified %>% distinct(ZFCHROM) %>% print(n=40)
+zf_ified
+
+##Need this to remove the old CHROM and POS columns as well as those other columns, rename the ZFCHROM and ZFPOS to CHROM and POS and filter POS < 0.  I like that you have the "rs" field here (still have remnant of the chrom.pos from original genome)
+zf_ified$CHROM <- NULL
+zf_ified$POS <- NULL
+zf_ified$mean.loc <- NULL
+zf_ified$sca.ori <- NULL
+zf_ified$length <- NULL
+
+colnames(zf_ified)[1] <- "CHROM"
+colnames(zf_ified)[2] <- "POS"
+dim(zf_ified)
+
+#Filter so that negative positions and unmapped scaffolds are removed:
+zf_ified <- filter(zf_ified, POS >0)
+dim(zf_ified)
+dim(vcf)
+write.table(zf_ified,"bslmm_top1eff.nare.imputed.CHtest.ZEFI1.4_41_noUN.gr0.txt",row.names=F,quote=F,sep="\t") 
+```
+
+```{r}
+traits <- c("wing_chord", "tail", "nare", "beak_length", 
+            "beak_depth", "beak_width", "pen_length", "pen_num", 
+            "plum_length", "plum_num", "nodes")
+
+miss <- "0.5"
+
+for (trait in traits) {
+  #Just want to reorder the files for traits that had significant SNPs, this saves space ass all the reordered files are large
+  snp_file_path <- paste0("results/lmm_results/GCRF_merged.SNP.filtered_",miss,"_",trait,"_soft_lmm.outlier_tally.csv")
+    if (!file.exists(snp_file_path)) {
+      print(paste(trait, miss, "doesn't exist"))
+      next
+    }
+  file_path <- paste0("results/lmm_output/GCRF_merged.SNP.filtered_",miss,"miss_",trait,"_soft_lmm.assoc.txt")
+  vcf <- read_tsv(file_path, comment = "##", progress = FALSE) %>% rename(CHROM=chr, POS=ps)
+  combo <- scaffs %>%
+  left_join(vcf)
+  combo <- combo[complete.cases(combo),]
+  
+  zf_ified <- combo %>%
+  mutate(ZFPOS = {
+    ML = floor(mean.loc)  # some temp variables to make it easier to express
+    Lo2 = floor(length/2)
+    L = length
+    ifelse(sca.ori == 1,
+           ML - Lo2 + POS,           # forward orientation
+           ML - Lo2 + (L - POS))     # reverse orientation
+  }) %>%
+  dplyr::select(ZFCHROM, ZFPOS, everything()) %>%
+  mutate(ZFCHROM = factor(ZFCHROM, levels = unique(ZFCHROM))) %>%   # this is to get them to sort correctly
+  arrange(ZFCHROM, ZFPOS)
+  
+  zf_ified %>% distinct(ZFCHROM) %>% print(n=40)
+  zf_ified
+  
+  zf_ified$CHROM <- NULL
+  zf_ified$POS <- NULL
+  zf_ified$mean.loc <- NULL
+  zf_ified$sca.ori <- NULL
+  zf_ified$length <- NULL
+
+  colnames(zf_ified)[1] <- "CHROM"
+  colnames(zf_ified)[2] <- "POS"
+  dim(zf_ified)
+
+  #Filter so that negative positions and unmapped scaffolds are removed:
+  zf_ified <- filter(zf_ified, POS > 0)
+  file_name <- paste0("figures/reordered_files/",trait,miss,"_soft.lmm_ZFchr_assoc_new_ZEFI1.4_41_noUN.txt")
+  print(file_name)
+  zf_ified %>% write_delim(file_name, quote = "none" ,delim = "\t", col_names = T)
+}
+```
+
